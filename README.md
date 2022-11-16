@@ -1,12 +1,165 @@
 # Foreword
 
+**THIS REVISION WAS RUSHED. IF YOU ARE UNSURE, USE THE MAIN BRANCH!**
+
 This guide assumes:
-1. you are comfortable with GNU/Linux commands.
-2. BlueOcean is a gloried UI thus I did not use it.
+1. You are comfortable with GNU/Linux commands.
+2. BlueOcean is a glorified UI thus I did not use it.
 3. You are running dind instead of passing the docker socket
 4. You are using Linux (this guide was written with Ubuntu 22.04)
 5. The user running all these commands belongs to the docker group (can run docker without sudo)
 6. The result just has to be satisfactory. Any hacks used will be tolerated.
+
+# Windows use
+
+The environment variables like `$HOME` will be switched to `%HOMEDRIVE%%HOMEPATH%` and `\` characters that was used for new line will be replaced with `^`.
+
+For more detailed use case, please refer `https://www.jenkins.io/doc/tutorials/build-a-node-js-and-react-app-with-npm/`
+
+# Extracting data volumes from CDN
+
+**WARNING**
+
+If you are unpacking data volumes from CDN, you **MUST** do these steps before running their respective containers.
+
+If you want to setup your own Jenkins (incl. OWASP DepCheck & Maven & SonarQube plugin) & SonarQube, you can safely skip to other sections such as `Lab X05`.
+
+```bash
+docker run \
+  --rm \
+  --name ubuntu \
+  --volume jenkins-data:/var/jenkins_home \
+  --volume sonarqube-data:/opt/sonarqube/data \
+  -it \
+  ubuntu:latest \
+  bash
+```
+
+After running the command above, **DO NOT CLOSE THIS TERMINAL!!**
+
+Switch to another terminal and continue with the commands below.
+
+```bash
+docker exec -u 0 -it ubuntu sh -c "apt update && apt install wget tar -y"
+docker exec -u 0 -it ubuntu sh -c "wget -c https://cflcdn.sgp1.digitaloceanspaces.com/sit/ict3203/lab_quiz_1/jenkins_home.tar.gz -O - | tar -pzxvf -"
+docker exec -u 0 -it ubuntu sh -c "wget -c https://cflcdn.sgp1.digitaloceanspaces.com/sit/ict3203/lab_quiz_1/sonarqube_data.tar.gz -O - | tar -pzxvf -"
+docker container kill ubuntu
+```
+
+## Starting the containers
+```bash
+docker network create jenkins
+```
+
+### DIND
+
+```bash
+docker run \
+  --name jenkins-docker \
+  --rm \
+  --detach \
+  --privileged \
+  --network jenkins \
+  --network-alias docker \
+  --env DOCKER_TLS_CERTDIR=/certs \
+  --volume jenkins-docker-certs:/certs/client \
+  --volume jenkins-data:/var/jenkins_home \
+  --publish 2376:2376 \
+  --publish 3000:3000 \
+  --publish 5000:5000 \
+  docker:dind \
+  --storage-driver overlay2
+```
+
+### BlueOcean
+```bash
+cd ~/
+mkdir blueocean && cd blueocean
+```
+
+Use an editor of your choice and paste the Dockerfile in and save it as `Dockerfile`
+
+```Dockerfile
+FROM jenkins/jenkins:2.361.3-jdk11
+USER root
+RUN apt-get update && apt-get install -y lsb-release
+RUN curl -fsSLo /usr/share/keyrings/docker-archive-keyring.asc \
+  https://download.docker.com/linux/debian/gpg
+RUN echo "deb [arch=$(dpkg --print-architecture) \
+  signed-by=/usr/share/keyrings/docker-archive-keyring.asc] \
+  https://download.docker.com/linux/debian \
+  $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+RUN apt-get update && apt-get install -y docker-ce-cli
+USER jenkins
+RUN jenkins-plugin-cli --plugins "blueocean:1.25.8 docker-workflow:521.v1a_a_dd2073b_2e"
+```
+
+```bash
+cat Dockerfile
+# if all is good, build the image
+docker build -t myjenkins-blueocean:2.361.3-1 .
+```
+
+```bash
+docker run \
+  --name jenkins-blueocean \
+  --detach \
+  --network jenkins \
+  --env DOCKER_HOST=tcp://docker:2376 \
+  --env DOCKER_CERT_PATH=/certs/client \
+  --env DOCKER_TLS_VERIFY=1 \
+  --publish 8080:8080 \
+  --publish 50000:50000 \
+  --volume jenkins-data:/var/jenkins_home \
+  --volume jenkins-docker-certs:/certs/client:ro \
+  --volume "$HOME":/home \
+  --restart=on-failure \
+  --env JAVA_OPTS="-Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true" \
+  myjenkins-blueocean:2.361.3-1
+```
+
+### SonarQube
+```
+docker run \
+  -d \
+  --name sonarqube \
+  --network jenkins \
+  -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+  -p 9000:9000 \
+  --volume sonarqube-data:/opt/sonarqube/data \
+  sonarqube:latest
+```
+
+## Credentials/token
+```bash
+# jenkins credentials
+# line 1 is the username
+# line 2 is the password
+# the username and password is the same
+docker exec -it jenkins-blueocean sh -c 'cat /var/jenkins_home/CREDENTIALS'
+
+# sonarqube credentials
+# line 1 is the username
+# line 2 is the password
+docker exec -it sonarqube sh -c 'cat /opt/sonarqube/data/CREDENTIALS'
+
+# sonarqube secret token
+docker exec -it sonarqube sh -c 'cat /opt/sonarqube/data/TOKEN'
+```
+
+## Dev notes
+
+You can safely ignore this section. Its just my notes for developing this solution.
+
+```bash
+# Note to self (dev)
+# create tarballs
+tar -pczvf /jenkins_home.tar.gz /var/jenkins_home/
+tar -pczvf /sonarqube_data.tar.gz /opt/sonarqube/data/
+
+# ls tarballs
+tar tvf /jenkins_home.tar.gz
+```
 
 # Lab X05
 
@@ -42,18 +195,14 @@ docker run \
 
 ## Creating Dockerfile for BlueOcean and building it
 
-Enter `Ctrl+C` after you have pasted it
-
 ```bash
 cd ~/
 mkdir blueocean && cd blueocean
 ```
 
-```bash
-# use an editor of your choice and paste the Dockerfile in
-```
+Use an editor of your choice and paste the Dockerfile in and save it as `Dockerfile`
 
-```
+```Dockerfile
 FROM jenkins/jenkins:2.361.3-jdk11
 USER root
 RUN apt-get update && apt-get install -y lsb-release
@@ -166,7 +315,7 @@ Now that you have the repo, we can create our Jenkinsfile.
 
 Add the content below into a new file with the name `Jenkinsfile` at the root directory of the repository.
 
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -201,7 +350,7 @@ If there are no issues, it should be a successful build.
 ## Adding test stage
 Going back to the file `Jenkinsfile` and replacing it with the content below.
 
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -235,7 +384,7 @@ The build should pass without issue. If not, please refer to the troubleshooting
 ## Adding the final deliver stage
 Going back to the file `Jenkinsfile` and replacing it with the content below.
 
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -296,7 +445,7 @@ Save it and the changes should reflect without need a rebuild.
 
 # Final Jenkinsfile
 
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -391,7 +540,7 @@ Change `SCM` to `Git` and input the path of the repository in `Repository URL`. 
 
 Now, we need to create the `Jenkinsfile`. Add the following content to the file `Jenkinsfile`.
 
-```
+```Groovy
 pipeline {
   agent any
   stages {
@@ -465,7 +614,7 @@ But this is not the correct format. So let's add the missing tags as shown below
 
 Now that we have a suppression list, we need to update our Jenkinsfile.
 
-```
+```Groovy
 pipeline {
   agent any
   stages {
@@ -539,7 +688,7 @@ As instructed, we need to add more stuff such as updating the test stage and hav
 
 
 ### Before
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -562,7 +711,7 @@ pipeline {
 ```
 
 ### After
-```
+```Groovy
 pipeline {
   agent {
     docker {
@@ -693,7 +842,7 @@ echo 'Visit http://localhost:5000 to see your PHP application in action.'
 
 ### New Jenkinsfile
 
-```
+```Groovy
 pipeline {
   agent none
   stages {
@@ -791,7 +940,7 @@ From `Dashboard`, click `Manage Jenkins` on the menu located on the left of the 
 
 Under `System Configuration` section, click `Manage Plugins`.
 
-Click on `Available` tab and search for `Warnings Next Generation Plugin`.
+Click on `Available` tab and search for `Warnings Next Generation` plugin.
 
 Check the box and click `Download now and install after restart`.
 
@@ -840,7 +989,7 @@ Enter `Maven` for the `Name`, uncheck `Install automatically`, enter the path fo
 
 ## Creating the Jenkinsfile
 
-```
+```Groovy
 pipeline {
   agent any
   stages {
@@ -911,7 +1060,13 @@ Run this command on your host.
 # i think this is redundant
 docker pull sonarqube:latest
 
-docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest
+docker run \
+  -d \
+  --name sonarqube \
+  -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+  -p 9000:9000 \
+  --volume sonarqube-data:/opt/sonarqube/data \
+  sonarqube:latest
 
 docker network connect jenkins sonarqube
 
@@ -962,7 +1117,7 @@ Select `Secret text` for `Kind`. Paste your token under `Secret`. It is fine to 
 
 Under `System Configuration` section, click `Configure System`.
 
-Scroll to find the section `SonarQube servers`. Click `Add SonarQube`, put `SonarQube` for the `Name, and the server URL `http://sonarqube:9000`.
+Scroll to find the section `SonarQube servers`. Click `Add SonarQube`, put `SonarQube` for the Name, and the server URL `http://sonarqube:9000`.
 
 For the `Server authentication token`, click on the dropdown menu and select the first option. It should be `Secret text`.
 
@@ -982,7 +1137,7 @@ Click `Save`.
 
 ## Creating the Jenkinsfile
 
-```
+```Groovy
 pipeline {
   agent any
   stages {
@@ -1021,6 +1176,8 @@ After the build is completed, head back to the SonarQube webpage and you should 
 ## Optional: Running SonarQube Scanner as a standalone
 
 ```bash
+# SONAR_LOGIN is the token
+# projectKey is the name of your SonarQube project
 docker run --rm -e SONAR_HOST_URL=http://192.168.16.128:9000 -e SONAR_LOGIN=2742fdcd3a1fe63a0912d32ebd77a1c74a4e212d -it -v "$(pwd):/usr/src" sonarsource/sonar-scanner-cli -Dsonar.projectKey=OWASP
 ```
 
@@ -1061,7 +1218,7 @@ Sections that can be configured:
 
 ### Compose file
 
-```
+```yml
 services:
   nginxwebsvr:
     image: nginx:alpine
@@ -1093,7 +1250,7 @@ Visit the URL `http://localhost:8080/`.
 
 Replace the compose file with the following
 
-```
+```yml
 services:
   nginxwebsvr:
     image: nginx:alpine
@@ -1141,7 +1298,7 @@ mkdir ./repos/
 
 Paste the content below into `git1.Dockerfile`
 
-```
+```Dockerfile
 FROM node:alpine
 
 RUN apk add --no-cache tini git \
@@ -1158,7 +1315,7 @@ ENTRYPOINT ["tini", "--", "git-http-server", "-p", "3000", "/home/git"]
 
 
 Replace the content below in `docker-compose.yml`
-```
+```yml
 services:
   nginxwebsvr:
     image: nginx:alpine
